@@ -1,0 +1,164 @@
+import time, asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+
+from config import BOT_TOKEN, REF_COST, DAILY_COOLDOWN, CHANNEL
+import database as db
+
+
+# ================= CHANNEL CHECK =================
+async def joined(bot, uid):
+    try:
+        m = await bot.get_chat_member(CHANNEL, uid)
+        return m.status in ["member", "administrator", "creator"]
+    except:
+        return False
+
+
+# ================= FILES =================
+load = lambda f: [x.strip() for x in open(f) if x.strip()]
+save = lambda f, d: open(f, "w").write("\n".join(d))
+
+
+# ================= ANIMATION =================
+async def loading(msg):
+    frames = [
+        "⏳ Loading.",
+        "⏳ Loading..",
+        "⏳ Loading...",
+        "⚡ Processing...",
+        "🔥 Finalizing...",
+        "✅ Done!"
+    ]
+    for f in frames:
+        await msg.edit_text(f)
+        await asyncio.sleep(0.4)
+
+
+# ================= START =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    db.add_user(u.id, u.username)
+
+    botname = (await context.bot.get_me()).username
+
+    # ================= REF SYSTEM =================
+    referrer = None
+    if context.args:
+        try:
+            ref_id = int(context.args[0])
+            referrer = db.set_referral(u.id, ref_id)
+        except:
+            pass
+
+    # notify referrer
+    if referrer:
+        try:
+            await context.bot.send_message(
+                referrer,
+                f"🎉 Referral success!\n👤 {u.first_name} joined using your link"
+            )
+        except:
+            pass
+
+    data = db.get(u.id)
+    refs = data[2]
+
+    kb = [
+        [InlineKeyboardButton("🎁 DAILY CLAIM", callback_data="daily")],
+        [InlineKeyboardButton("👑 VIP CLAIM", callback_data="vip")],
+        [InlineKeyboardButton("👥 INVITE FRIENDS", callback_data="invite")],
+        [InlineKeyboardButton("📊 MY REFERRALS", callback_data="refs")],
+        [InlineKeyboardButton("🏆 LEADERBOARD", callback_data="lb")],
+        [InlineKeyboardButton("📢 JOIN CHANNEL", url=f"https://t.me/{CHANNEL.replace('@','')}")]
+    ]
+
+    await update.message.reply_text(
+        f"✨ PREMIUM SYSTEM\n\n👥 Referrals: {refs}",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+# ================= BUTTONS =================
+async def btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    uid = q.from_user.id
+
+    if q.data == "invite":
+        botname = (await context.bot.get_me()).username
+
+        # 🔥 FIXED REAL REF LINK
+        link = f"https://t.me/{botname}?start={uid}"
+
+        return await q.message.reply_text(
+            f"👥 Your Invite Link:\n\n{link}\n\nShare this to earn referrals!"
+        )
+
+    if not await joined(context.bot, uid):
+        return await q.edit_message_text("⚠️ Join channel first")
+
+    data = db.get(uid)
+    refs = data[2]
+    last = data[4]
+
+    if q.data == "refs":
+        return await q.edit_message_text(f"👥 Your Referrals: {refs}")
+
+    if q.data == "lb":
+        top = db.top()
+        text = "🏆 LEADERBOARD\n\n"
+        for i, (u, r) in enumerate(top, 1):
+            text += f"{i}. {u} — {r} refs\n"
+        return await q.edit_message_text(text)
+
+    if q.data == "daily":
+        now = time.time()
+
+        if now - last < DAILY_COOLDOWN:
+            remain = int(DAILY_COOLDOWN - (now - last))
+            return await q.edit_message_text(f"⏳ Wait {remain//3600}h")
+
+        acc = load("accounts/daily.txt")
+        if not acc:
+            return await q.edit_message_text("❌ No rewards")
+
+        msg = await q.edit_message_text("⏳ Processing...")
+        await loading(msg)
+
+        save("accounts/daily.txt", acc[1:])
+        db.update_time(uid, now)
+
+        return await context.bot.send_message(uid, f"🎁 DAILY:\n\n{acc[0]}")
+
+    if q.data == "vip":
+        if refs < REF_COST:
+            return await q.edit_message_text("❌ Not enough referrals")
+
+        vip = load("accounts/vip.txt")
+        if not vip:
+            return await q.edit_message_text("❌ No VIP rewards")
+
+        msg = await q.edit_message_text("👑 Processing VIP...")
+        await loading(msg)
+
+        save("accounts/vip.txt", vip[1:])
+
+        import sqlite3
+        conn = sqlite3.connect("users.db")
+        c = conn.cursor()
+        c.execute("UPDATE users SET referrals=? WHERE user_id=?", (max(0, refs - REF_COST), uid))
+        conn.commit()
+
+        return await context.bot.send_message(uid, f"👑 VIP:\n\n{vip[0]}")
+
+
+# ================= RUN =================
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(btn))
+
+print("🚀 FIXED INVITE REF SYSTEM RUNNING")
+app.run_polling()
